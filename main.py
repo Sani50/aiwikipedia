@@ -1,8 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import json
-import pathlib
 
 from database import SessionLocal, engine
 from models import Base, QuizSession
@@ -11,17 +10,32 @@ from scraper import scrape_wikipedia
 from llm import generate_quiz
 
 app = FastAPI(title="AI Wiki Quiz Generator")
+
+# ✅ CREATE TABLES
 Base.metadata.create_all(bind=engine)
 
-BASE_DIR = pathlib.Path(__file__).resolve().parent.parent
+# ✅ CORS FIX (THIS IS THE IMPORTANT PART)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "*",  # ✅ allows null (local file), Netlify, etc.
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+# ---------------- DB DEPENDENCY ----------------
 
-@app.get("/", response_class=HTMLResponse)
-def serve_frontend():
-    return (BASE_DIR / "frontend" / "index.html").read_text(encoding="utf-8")
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
+# ---------------- PREVIEW ----------------
 
-# ✅ FIX: preview only needs URL, not full QuizRequest
 @app.post("/preview")
 def preview_url(payload: dict):
     url = payload.get("url")
@@ -37,14 +51,7 @@ def preview_url(payload: dict):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
+# ---------------- GENERATE QUIZ ----------------
 
 @app.post("/generate-quiz")
 def generate_quiz_api(req: QuizRequest, db: Session = Depends(get_db)):
@@ -65,20 +72,17 @@ def generate_quiz_api(req: QuizRequest, db: Session = Depends(get_db)):
             num_questions=required - len(all_questions)
         )
 
-        if not isinstance(llm_output, dict):
-            attempts += 1
-            continue
+        if isinstance(llm_output, dict):
+            quiz_chunk = llm_output.get("quiz", [])
+            if isinstance(quiz_chunk, list):
+                all_questions.extend(quiz_chunk)
 
-        quiz_chunk = llm_output.get("quiz", [])
-        if isinstance(quiz_chunk, list):
-            all_questions.extend(quiz_chunk)
+            related_topics = llm_output.get("related_topics", [])
 
-        related_topics = llm_output.get("related_topics", [])
         attempts += 1
 
     quiz_list = all_questions[:required]
 
-    # ✅ FIX: UPSERT LOGIC (no double commit)
     existing = db.query(QuizSession).filter(
         QuizSession.url == req.url
     ).first()
@@ -115,11 +119,11 @@ def generate_quiz_api(req: QuizRequest, db: Session = Depends(get_db)):
         "related_topics": related_topics
     }
 
+# ---------------- FETCH SAVED QUIZZES ----------------
 
 @app.get("/quizzes")
 def list_quizzes(db: Session = Depends(get_db)):
     return db.query(QuizSession).all()
-
 
 @app.get("/quiz/{quiz_id}")
 def quiz_details(quiz_id: int, db: Session = Depends(get_db)):
