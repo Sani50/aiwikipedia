@@ -15,20 +15,27 @@ Base.metadata.create_all(bind=engine)
 
 BASE_DIR = pathlib.Path(__file__).resolve().parent.parent
 
+
 @app.get("/", response_class=HTMLResponse)
 def serve_frontend():
     return (BASE_DIR / "frontend" / "index.html").read_text(encoding="utf-8")
 
+
+# ✅ FIX: preview only needs URL, not full QuizRequest
 @app.post("/preview")
-def preview_url(req: QuizRequest):
+def preview_url(payload: dict):
+    url = payload.get("url")
+    if not url:
+        raise HTTPException(status_code=400, detail="URL is required")
+
     try:
-        data = scrape_wikipedia(req.url)
+        data = scrape_wikipedia(url)
         return {
             "title": data["title"],
             "summary": data["summary"]
         }
     except Exception as e:
-        return {"error": str(e)}
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 def get_db():
@@ -38,15 +45,10 @@ def get_db():
     finally:
         db.close()
 
+
 @app.post("/generate-quiz")
 def generate_quiz_api(req: QuizRequest, db: Session = Depends(get_db)):
 
-    # ❌ DISABLE CACHE (was causing same quiz every time)
-    # existing = db.query(QuizSession).filter(
-    #     QuizSession.url == req.url
-    # ).first()
-
-    # Scrape Wikipedia
     try:
         scraped = scrape_wikipedia(req.url)
     except Exception as e:
@@ -55,7 +57,7 @@ def generate_quiz_api(req: QuizRequest, db: Session = Depends(get_db)):
     required = req.num_questions or 5
     all_questions = []
     attempts = 0
-    last_related_topics = []
+    related_topics = []
 
     while len(all_questions) < required and attempts < 3:
         llm_output = generate_quiz(
@@ -63,88 +65,61 @@ def generate_quiz_api(req: QuizRequest, db: Session = Depends(get_db)):
             num_questions=required - len(all_questions)
         )
 
-        # 🔒 GUARD AGAINST BAD LLM OUTPUT
         if not isinstance(llm_output, dict):
             attempts += 1
             continue
 
         quiz_chunk = llm_output.get("quiz", [])
-        if not isinstance(quiz_chunk, list):
-            attempts += 1
-            continue
+        if isinstance(quiz_chunk, list):
+            all_questions.extend(quiz_chunk)
 
-        all_questions.extend(quiz_chunk)
-        last_related_topics = llm_output.get("related_topics", [])
+        related_topics = llm_output.get("related_topics", [])
         attempts += 1
 
     quiz_list = all_questions[:required]
 
-    # Store in DB
-    quiz_session = QuizSession(
-        url=req.url,
-        title=scraped["title"],
-        summary=scraped["summary"],
-        quiz_json=json.dumps({
-            "quiz": quiz_list,
-            "related_topics": last_related_topics
-        })
-    )
-    
-    
-    
-    try:
-        db.add(quiz_session)
-        db.commit()
-        db.refresh(quiz_session)
-    except Exception:
-        db.rollback()
-
-        existing = db.query(QuizSession).filter(
+    # ✅ FIX: UPSERT LOGIC (no double commit)
+    existing = db.query(QuizSession).filter(
         QuizSession.url == req.url
-        ).first()
+    ).first()
 
-        if existing:
-            existing.title = scraped["title"]
-            existing.summary = scraped["summary"]
-            existing.quiz_json = json.dumps({
+    if existing:
+        existing.title = scraped["title"]
+        existing.summary = scraped["summary"]
+        existing.quiz_json = json.dumps({
             "quiz": quiz_list,
-            "related_topics": last_related_topics
+            "related_topics": related_topics
         })
-            db.commit()
-            quiz_session = existing
+        quiz_session = existing
+    else:
+        quiz_session = QuizSession(
+            url=req.url,
+            title=scraped["title"],
+            summary=scraped["summary"],
+            quiz_json=json.dumps({
+                "quiz": quiz_list,
+                "related_topics": related_topics
+            })
+        )
+        db.add(quiz_session)
 
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-
-    db.add(quiz_session)
     db.commit()
     db.refresh(quiz_session)
 
     return {
         "id": quiz_session.id,
-        "url": req.url,
-        "title": scraped["title"],
-        "summary": scraped["summary"],
+        "url": quiz_session.url,
+        "title": quiz_session.title,
+        "summary": quiz_session.summary,
         "quiz": quiz_list,
-        "related_topics": last_related_topics
+        "related_topics": related_topics
     }
+
 
 @app.get("/quizzes")
 def list_quizzes(db: Session = Depends(get_db)):
     return db.query(QuizSession).all()
+
 
 @app.get("/quiz/{quiz_id}")
 def quiz_details(quiz_id: int, db: Session = Depends(get_db)):
