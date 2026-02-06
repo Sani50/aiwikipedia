@@ -11,6 +11,21 @@ from llm import generate_quiz
 
 app = FastAPI(title="AI Wiki Quiz Generator")
 
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://fendq.netlify.app"
+    ],
+    allow_credentials=False,   # 🔴 MUST be False
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+
+
 # ✅ CREATE TABLES
 Base.metadata.create_all(bind=engine)
 
