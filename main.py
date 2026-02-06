@@ -12,6 +12,8 @@ from llm import generate_quiz
 app = FastAPI(title="AI Wiki Quiz Generator")
 
 app = FastAPI()
+print("🚨 CORS MIDDLEWARE LOADING", flush=True)
+
 
 app.add_middleware(
     CORSMiddleware,
