@@ -4,7 +4,7 @@ import re
 from langchain_groq import ChatGroq
 
 llm = ChatGroq(
-    api_key="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",
+    api_key="key",
     model="llama-3.1-8b-instant"
 ,
     temperature=0.4
